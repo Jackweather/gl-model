@@ -254,6 +254,133 @@ function paddedPaletteColors(palette) {
   return out;
 }
 
+// Compute contour line segments using a simple marching-squares implementation.
+// Returns a GeoJSON FeatureCollection of LineString segments for each level.
+function computeContours(metadata, textureBytes, step) {
+  const width = metadata.width;
+  const height = metadata.height;
+  const dataMin = metadata.encoding.valueRange.dataMin;
+  const dataMax = metadata.encoding.valueRange.dataMax;
+  const west = metadata.bounds.west;
+  const east = metadata.bounds.east;
+  const south = metadata.bounds.south;
+  const north = metadata.bounds.north;
+
+  const lonSpan = east - west;
+  const latSpan = north - south;
+
+  // Reconstruct floating values (0 in textureBytes = no-data)
+  const values = new Array(height);
+  for (let y = 0; y < height; y++) {
+    const row = new Float32Array(width);
+    for (let x = 0; x < width; x++) {
+      const b = textureBytes[y * width + x];
+      if (!b) {
+        row[x] = NaN;
+      } else {
+        row[x] = dataMin + ((b - 1) / 254.0) * (dataMax - dataMin);
+      }
+    }
+    values[y] = row;
+  }
+
+  const lonAt = (x) => west + (x + 0.5) * (lonSpan / width);
+  const latAt = (y) => south + (y + 0.5) * (latSpan / height);
+
+  const minLevel = Math.floor(dataMin / step) * step;
+  const maxLevel = Math.ceil(dataMax / step) * step;
+  const levels = [];
+  for (let L = minLevel; L <= maxLevel; L += step) levels.push(L);
+
+  const table = {
+    0: [],
+    1: [[3, 2]],
+    2: [[2, 1]],
+    3: [[3, 1]],
+    4: [[0, 1]],
+    5: [[0, 3], [1, 2]],
+    6: [[0, 2]],
+    7: [[0, 3]],
+    8: [[0, 3]],
+    9: [[0, 2]],
+    10: [[0, 1], [2, 3]],
+    11: [[0, 1]],
+    12: [[3, 1]],
+    13: [[2, 1]],
+    14: [[3, 2]],
+    15: [],
+  };
+
+  function interpEdge(ix, iy, edge, level) {
+    const v00 = values[iy][ix];
+    const v10 = values[iy][ix + 1];
+    const v11 = values[iy + 1][ix + 1];
+    const v01 = values[iy + 1][ix];
+
+    if (edge === 0) {
+      if (!isFinite(v00) || !isFinite(v10) || v10 === v00) return null;
+      const t = (level - v00) / (v10 - v00);
+      const lon = lonAt(ix) + t * (lonAt(ix + 1) - lonAt(ix));
+      const lat = latAt(iy);
+      return [lon, lat];
+    }
+
+    if (edge === 1) {
+      if (!isFinite(v10) || !isFinite(v11) || v11 === v10) return null;
+      const t = (level - v10) / (v11 - v10);
+      const lon = lonAt(ix + 1);
+      const lat = latAt(iy) + t * (latAt(iy + 1) - latAt(iy));
+      return [lon, lat];
+    }
+
+    if (edge === 2) {
+      if (!isFinite(v01) || !isFinite(v11) || v11 === v01) return null;
+      const t = (level - v01) / (v11 - v01);
+      const lon = lonAt(ix) + t * (lonAt(ix + 1) - lonAt(ix));
+      const lat = latAt(iy + 1);
+      return [lon, lat];
+    }
+
+    if (edge === 3) {
+      if (!isFinite(v00) || !isFinite(v01) || v01 === v00) return null;
+      const t = (level - v00) / (v01 - v00);
+      const lon = lonAt(ix);
+      const lat = latAt(iy) + t * (latAt(iy + 1) - latAt(iy));
+      return [lon, lat];
+    }
+
+    return null;
+  }
+
+  const features = [];
+  for (const L of levels) {
+    for (let iy = 0; iy < height - 1; iy++) {
+      for (let ix = 0; ix < width - 1; ix++) {
+        const v00 = values[iy][ix];
+        const v10 = values[iy][ix + 1];
+        const v11 = values[iy + 1][ix + 1];
+        const v01 = values[iy + 1][ix];
+
+        const b0 = isFinite(v00) && v00 > L ? 1 : 0;
+        const b1 = isFinite(v10) && v10 > L ? 1 : 0;
+        const b2 = isFinite(v11) && v11 > L ? 1 : 0;
+        const b3 = isFinite(v01) && v01 > L ? 1 : 0;
+        const idx = b0 * 8 + b1 * 4 + b2 * 2 + b3 * 1;
+        const segs = table[idx] || [];
+        for (const seg of segs) {
+          const a = interpEdge(ix, iy, seg[0], L);
+          const b = interpEdge(ix, iy, seg[1], L);
+          if (a && b) {
+            features.push({ type: "Feature", properties: { level: L }, geometry: { type: "LineString", coordinates: [a, b] } });
+          }
+        }
+      }
+    }
+  }
+
+  return { type: "FeatureCollection", features };
+}
+
 function renderLegendTicks(palette) {
   if (!legendTicks) {
     return;
@@ -1313,6 +1440,36 @@ async function loadDataset() {
 
   setMetadata(datasetEntry.metadata);
   reflectivityLayer.setDataset(datasetEntry.metadata, datasetEntry.textureBytes);
+
+  // If this product is pressure, remove shaded rendering and draw black
+  // contour lines every 6 hPa instead. For other products, ensure
+  // pressure contour layer is removed and restore normal opacity.
+  const isPressure = datasetEntry.metadata.palette?.kind === "pressure";
+  // remove any existing contour layer/source first
+  if (map.getLayer && map.getLayer("pressure-contours-layer")) {
+    try { map.removeLayer("pressure-contours-layer"); } catch (e) {}
+  }
+  if (map.getSource && map.getSource("pressure-contours")) {
+    try { map.removeSource("pressure-contours"); } catch (e) {}
+  }
+
+  if (isPressure) {
+    reflectivityLayer.setOpacity(0);
+    const contoursGeoJSON = computeContours(datasetEntry.metadata, datasetEntry.textureBytes, 6);
+    try {
+      map.addSource("pressure-contours", { type: "geojson", data: contoursGeoJSON });
+      map.addLayer({
+        id: "pressure-contours-layer",
+        type: "line",
+        source: "pressure-contours",
+        paint: { "line-color": "#000000", "line-width": 1.5 },
+      });
+    } catch (e) {
+      // ignore add failures
+    }
+  } else {
+    reflectivityLayer.setOpacity(currentOpacity);
+  }
 
   const bounds = datasetEntry.metadata.mercatorBounds;
   // Only fit bounds when allowed (initial load or explicit run change).
