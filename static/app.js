@@ -106,6 +106,8 @@ function renderProductButtons() {
       currentProductId = nextProductId;
       currentFrameSourceUrl = currentProduct()?.sourceUrl || "";
       renderProductButtons();
+      // Update available runs for the newly-selected product, then load it
+      void renderRunSelector();
       void refreshLatestFrame();
     });
   }
@@ -155,10 +157,18 @@ async function renderRunSelector() {
     if (runs[i].available) { defaultIndex = i; break; }
   }
   if (runs.length) {
-    runSelect.value = runs[defaultIndex].sourceUrl;
-    // Prefer the first available run as the current source for subsequent loads
-    if (runs[defaultIndex]?.available) {
-      currentFrameSourceUrl = runs[defaultIndex].sourceUrl;
+    // If we already have a selected frame (e.g. user switched product), keep it.
+    // Otherwise default to the first available run from the probe.
+    if (currentFrameSourceUrl) {
+      // try to preserve the current value in the selector when possible
+      const hasCurrent = runs.some((r) => r.sourceUrl === currentFrameSourceUrl);
+      runSelect.value = hasCurrent ? currentFrameSourceUrl : runs[defaultIndex].sourceUrl;
+    } else {
+      runSelect.value = runs[defaultIndex].sourceUrl;
+      // Prefer the first available run as the current source for subsequent loads
+      if (runs[defaultIndex]?.available) {
+        currentFrameSourceUrl = runs[defaultIndex].sourceUrl;
+      }
     }
   }
 
