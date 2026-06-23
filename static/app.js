@@ -106,8 +106,6 @@ function renderProductButtons() {
       currentProductId = nextProductId;
       currentFrameSourceUrl = currentProduct()?.sourceUrl || "";
       renderProductButtons();
-      // Update available runs for the newly-selected product, then load it
-      void renderRunSelector();
       void refreshLatestFrame();
     });
   }
@@ -157,18 +155,10 @@ async function renderRunSelector() {
     if (runs[i].available) { defaultIndex = i; break; }
   }
   if (runs.length) {
-    // If we already have a selected frame (e.g. user switched product), keep it.
-    // Otherwise default to the first available run from the probe.
-    if (currentFrameSourceUrl) {
-      // try to preserve the current value in the selector when possible
-      const hasCurrent = runs.some((r) => r.sourceUrl === currentFrameSourceUrl);
-      runSelect.value = hasCurrent ? currentFrameSourceUrl : runs[defaultIndex].sourceUrl;
-    } else {
-      runSelect.value = runs[defaultIndex].sourceUrl;
-      // Prefer the first available run as the current source for subsequent loads
-      if (runs[defaultIndex]?.available) {
-        currentFrameSourceUrl = runs[defaultIndex].sourceUrl;
-      }
+    runSelect.value = runs[defaultIndex].sourceUrl;
+    // Prefer the first available run as the current source for subsequent loads
+    if (runs[defaultIndex]?.available) {
+      currentFrameSourceUrl = runs[defaultIndex].sourceUrl;
     }
   }
 
@@ -233,6 +223,35 @@ function paddedPaletteStops(palette) {
   }
 
   return new Float32Array(padded);
+}
+
+function paddedPaletteColors(palette) {
+  const colors = Array.isArray(palette?.colors) ? palette.colors.slice(0, MAX_PALETTE_STOPS) : [];
+  if (!colors.length) {
+    // default to white if no colors
+    const out = new Float32Array(MAX_PALETTE_STOPS * 3);
+    for (let i = 0; i < MAX_PALETTE_STOPS; i++) {
+      out[i * 3 + 0] = 1.0;
+      out[i * 3 + 1] = 1.0;
+      out[i * 3 + 2] = 1.0;
+    }
+    return out;
+  }
+
+  const padded = colors.slice();
+  while (padded.length < MAX_PALETTE_STOPS) padded.push(padded[padded.length - 1]);
+
+  const out = new Float32Array(MAX_PALETTE_STOPS * 3);
+  for (let i = 0; i < MAX_PALETTE_STOPS; i++) {
+    const hex = padded[i] || "#ffffff";
+    const r = parseInt(hex.slice(1, 3), 16) / 255.0;
+    const g = parseInt(hex.slice(3, 5), 16) / 255.0;
+    const b = parseInt(hex.slice(5, 7), 16) / 255.0;
+    out[i * 3 + 0] = r;
+    out[i * 3 + 1] = g;
+    out[i * 3 + 2] = b;
+  }
+  return out;
 }
 
 function renderLegendTicks(palette) {
@@ -734,6 +753,7 @@ class ReflectivityLayer {
       uniform float uDataMin;
       uniform float uDataMax;
       uniform float uPaletteStops[12];
+      uniform vec3 uPaletteColors[12];
       uniform float uWest;
       uniform float uEast;
       uniform float uSouth;
@@ -932,6 +952,23 @@ class ReflectivityLayer {
         return mix(c10, c11, (t - 0.9090) / 0.0910);
       }
 
+      vec3 paletteFromUniform(float t) {
+        if (uPaletteStopCount <= 1) return uPaletteColors[0];
+        float scaled = t * float(uPaletteStopCount - 1);
+        // iterate over palette segments using a compile-time loop index
+        for (int j = 0; j < PALETTE_SIZE - 1; j++) {
+          if (j >= uPaletteStopCount - 1) break;
+          float lower = float(j);
+          float upper = float(j + 1);
+          if (scaled <= upper) {
+            float ft = clamp((scaled - lower) / max(upper - lower, 0.0001), 0.0, 1.0);
+            return mix(uPaletteColors[j], uPaletteColors[j + 1], ft);
+          }
+        }
+        // fallback: return last palette color (padded on JS side)
+        return uPaletteColors[PALETTE_SIZE - 1];
+      }
+
       vec3 precipIdPalette(float t) {
         float bucket = floor(t * 7.0 + 0.5);
 
@@ -970,6 +1007,10 @@ class ReflectivityLayer {
 
         if (uPaletteMode == 3) {
           return temperaturePalette(t);
+        }
+
+        if (uPaletteMode == 5) {
+          return paletteFromUniform(t);
         }
 
         if (uPaletteMode == 4) {
@@ -1143,12 +1184,21 @@ class ReflectivityLayer {
             ? 3
             : this.pendingMetadata.palette.kind === "precip_id"
               ? 4
-              : 0,
+              : this.pendingMetadata.palette.kind === "pressure"
+                ? 5
+                : 0,
     );
     gl.uniform1f(gl.getUniformLocation(this.program, "uWest"), this.pendingMetadata.bounds.west);
     gl.uniform1f(gl.getUniformLocation(this.program, "uEast"), this.pendingMetadata.bounds.east);
     gl.uniform1f(gl.getUniformLocation(this.program, "uSouth"), this.pendingMetadata.bounds.south);
     gl.uniform1f(gl.getUniformLocation(this.program, "uNorth"), this.pendingMetadata.bounds.north);
+
+    // supply palette colors as vec3 array for shader interpolation
+    const paletteColors = paddedPaletteColors(this.pendingMetadata.palette);
+    const paletteColorLoc = gl.getUniformLocation(this.program, "uPaletteColors");
+    if (paletteColorLoc) {
+      gl.uniform3fv(paletteColorLoc, paletteColors);
+    }
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
