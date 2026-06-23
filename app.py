@@ -201,6 +201,36 @@ PRODUCT_CONFIGS["tmp2m"] = {
         ],
     },
 }
+# Mean sea level pressure (PRMSL) in GRIB is typically Pa; convert to hPa
+PRODUCT_CONFIGS["prmsl"] = {
+    "id": "prmsl",
+    "label": "Pressure",
+    "legendTitle": "MSLP",
+    "sourceUrl": "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?dir=%2Fgfs.20260623%2F12%2Fatmos&file=gfs.t12z.pgrb2.0p25.f000&var_PRMSL=on&lev_surface=on&lev_mean_sea_level=on",
+    "historyPrefix": "filter_gfs_0p25.pl",
+    "messageTerms": ["prmsl", "prmslmsl", "pressure", "mean_sea_level"],
+    # allow realistic pressure ranges (hPa). We'll convert Pa -> hPa (x0.01)
+    "minimumValue": 0.0,
+    "valueScale": 0.01,
+    "units": "hPa",
+    "unitsFallback": "hPa",
+    "palette": {
+        "kind": "pressure",
+        "label": "hPa",
+        # explicit stops include a min and max to display
+        "values": [870.0, 900.0, 925.0, 950.0, 975.0, 1000.0, 1020.0, 1040.0],
+        "colors": [
+            "#2c7bb6",  # very low
+            "#abd9e9",
+            "#ffffbf",
+            "#fdae61",
+            "#f46d43",
+            "#d73027",
+            "#a50026",
+            "#7f0000",  # very high
+        ],
+    },
+}
 def _make_dynamic_default_source_url(sample_url: str) -> str:
     """Given a sample NOMADS CGI URL, replace the embedded run date/cycle
     with the most-recent (past) cycle for the current UTC time. Falls back
