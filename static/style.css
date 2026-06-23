@@ -1,0 +1,306 @@
+:root {
+  color-scheme: dark;
+  --bg: #07111f;
+  --panel: rgba(4, 14, 28, 0.92);
+  --panel-border: rgba(128, 191, 255, 0.18);
+  --text: #ecf5ff;
+  --muted: #93b4cc;
+  --accent: #50d5b7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(42, 93, 148, 0.35), transparent 34%),
+    radial-gradient(circle at bottom right, rgba(17, 120, 103, 0.22), transparent 28%),
+    var(--bg);
+  color: var(--text);
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 100vh;
+}
+
+.control-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 18px;
+  padding: 24px 18px;
+  background: var(--panel);
+  border-right: 1px solid var(--panel-border);
+  backdrop-filter: blur(18px);
+  position: relative;
+  z-index: 100000; /* ensure panel sits above the map */
+  pointer-events: auto;
+}
+
+.product-buttons {
+  display: grid;
+  gap: 10px;
+}
+
+.opacity-control {
+  display: grid;
+  gap: 10px;
+}
+
+.product-button {
+  width: 100%;
+  border: 1px solid rgba(131, 187, 245, 0.24);
+  border-radius: 14px;
+  background: rgba(6, 20, 36, 0.76);
+  color: var(--muted);
+  padding: 11px 12px;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease, transform 140ms ease;
+}
+
+.product-button:hover {
+  border-color: rgba(80, 213, 183, 0.5);
+  color: var(--text);
+}
+
+.product-button.is-active {
+  border-color: rgba(80, 213, 183, 0.8);
+  background: linear-gradient(135deg, rgba(80, 213, 183, 0.18), rgba(27, 72, 103, 0.5));
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.legend {
+  width: 100%;
+  margin: 0;
+}
+
+.legend-title {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.control-panel h1 {
+  margin: 0 0 10px;
+  font-size: 1.8rem;
+}
+
+.control-panel p,
+label,
+dt,
+dd,
+.legend-labels,
+.status-box,
+.control-note,
+.slider-header span {
+  color: var(--muted);
+}
+
+label {
+  display: block;
+  margin: 16px 0 8px;
+  font-size: 0.92rem;
+}
+
+input,
+select,
+textarea,
+button {
+  width: 100%;
+  border-radius: 14px;
+  border: 1px solid rgba(131, 187, 245, 0.2);
+  background: rgba(6, 20, 36, 0.9);
+  color: var(--text);
+  padding: 12px 14px;
+  font: inherit;
+  pointer-events: auto;
+}
+
+/* Ensure controls visually and interactively sit above the map canvas */
+.control-panel input,
+.control-panel select,
+.control-panel button {
+  position: relative;
+  z-index: 2000;
+}
+
+/* Improve touch/drag interaction on range inputs */
+input[type="range"] {
+  touch-action: pan-y; /* allow dragging horizontally on pointer devices */
+  -ms-touch-action: pan-y;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.slider-header,
+.timeline-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 16px;
+}
+
+.slider-header label,
+.timeline-header label {
+  margin: 0;
+}
+
+.slider-header span,
+.timeline-header span {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+input[type="range"] {
+  margin-top: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Ensure the main map sits below the control panel */
+.map-shell,
+#map {
+  position: relative;
+  z-index: 0;
+}
+
+.control-note {
+  margin: 8px 0 0;
+  font-size: 0.85rem;
+}
+
+.legend-bar {
+  height: 14px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    #b6ffb6,
+    #54f354,
+    #19a319,
+    #016601,
+    #c9c938,
+    #f5f825,
+    #ffd700,
+    #ffa500,
+    #ff7f50,
+    #ff4500,
+    #ff1493,
+    #9400d3
+  );
+}
+
+.legend-ticks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.legend-tick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(6, 20, 36, 0.88);
+  border: 1px solid rgba(131, 187, 245, 0.16);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.legend-tick::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--legend-tick-color, var(--accent));
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.legend-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 0.85rem;
+}
+
+.meta-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 12px;
+  margin: 22px 0;
+}
+
+.meta-list dt {
+  font-weight: 700;
+}
+
+.meta-list dd {
+  margin: 0;
+  text-align: right;
+}
+
+.status-box {
+  margin: 0;
+  padding: 14px;
+  min-height: 84px;
+  white-space: pre-wrap;
+  border-radius: 14px;
+  background: rgba(1, 9, 18, 0.88);
+}
+
+.map-shell,
+#map {
+  min-height: 100vh;
+}
+
+.hover-value-popup .mapboxgl-popup-content {
+  padding: 8px 10px;
+  border: 1px solid rgba(131, 187, 245, 0.28);
+  border-radius: 10px;
+  background: rgba(4, 14, 28, 0.94);
+  color: var(--text);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.hover-value-popup .mapboxgl-popup-tip {
+  border-top-color: rgba(4, 14, 28, 0.94);
+}
+
+@media (max-width: 960px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .control-panel {
+    border-right: 0;
+    border-bottom: 1px solid var(--panel-border);
+  }
+
+  .map-shell,
+  #map {
+    min-height: 60vh;
+  }
+}
