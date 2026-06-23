@@ -11,6 +11,7 @@ const opacityValue = document.getElementById("opacityValue");
 const forecastSlider = document.getElementById("forecastSlider");
 const forecastLabel = document.getElementById("forecastLabel");
 const runSelect = document.getElementById("runSelect");
+const pressureOverlayCheckbox = document.getElementById("pressureOverlayCheckbox");
 
 const MAX_PALETTE_STOPS = 12;
 
@@ -21,6 +22,7 @@ let appConfig;
 let loadSequence = 0;
 let frameHistory = [];
 let hoverPopup;
+let pressureExtremaZoomHandler = null;
 let currentProductId = "";
 let currentFrameSourceUrl = "";
 let currentOpacity = 0.82;
@@ -109,6 +111,14 @@ function renderProductButtons() {
       void refreshLatestFrame();
     });
   }
+}
+
+// Re-load dataset when overlay checkbox changes
+if (pressureOverlayCheckbox) {
+  pressureOverlayCheckbox.addEventListener("change", () => {
+    // reload current frame to add/remove contours
+    void loadDataset().catch(() => {});
+  });
 }
 
 // temperature button removed from UI
@@ -381,6 +391,135 @@ function computeContours(metadata, textureBytes, step) {
   return { type: "FeatureCollection", features };
 }
 
+// Map zoom -> extrema separation (km). Fewer extrema when zoomed out.
+function separationForZoom(zoom) {
+  if (zoom < 4) return 800.0;
+  if (zoom < 6) return 500.0;
+  if (zoom < 8) return 300.0;
+  return 150.0;
+}
+
+// Find local maxima (Highs) and minima (Lows) in the pressure grid.
+// Returns GeoJSON FeatureCollection with Point features having
+// properties { label: 'H'|'L', value: number }.
+function computePressureExtrema(metadata, textureBytes, minSeparationKm = 500.0) {
+  const width = metadata.width;
+  const height = metadata.height;
+  const dataMin = metadata.encoding.valueRange.dataMin;
+  const dataMax = metadata.encoding.valueRange.dataMax;
+  const west = metadata.bounds.west;
+  const east = metadata.bounds.east;
+  const south = metadata.bounds.south;
+  const north = metadata.bounds.north;
+
+  const lonAt = (x) => west + (x + 0.5) * ((east - west) / width);
+  const latAt = (y) => south + (y + 0.5) * ((north - south) / height);
+
+  // rebuild float grid from encoded bytes
+  const values = new Array(height);
+  for (let y = 0; y < height; y++) {
+    const row = new Float32Array(width);
+    for (let x = 0; x < width; x++) {
+      const b = textureBytes[y * width + x];
+      row[x] = b ? dataMin + ((b - 1) / 254.0) * (dataMax - dataMin) : NaN;
+    }
+    values[y] = row;
+  }
+
+  const features = [];
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const v = values[y][x];
+      if (!isFinite(v)) continue;
+      // check 8 neighbors
+      let isMax = true;
+      let isMin = true;
+      for (let yy = -1; yy <= 1; yy++) {
+        for (let xx = -1; xx <= 1; xx++) {
+          if (xx === 0 && yy === 0) continue;
+          const nv = values[y + yy][x + xx];
+          if (!isFinite(nv)) continue;
+          if (nv >= v) isMax = false;
+          if (nv <= v) isMin = false;
+        }
+      }
+      if (!isMax && !isMin) continue;
+
+      const lon = lonAt(x);
+      const lat = latAt(y);
+      const label = isMax ? "H" : "L";
+      const value = Math.round(v);
+      features.push({ type: "Feature", properties: { label, value }, geometry: { type: "Point", coordinates: [lon, lat] } });
+    }
+  }
+
+  // Simple suppression: remove extrema within a minimum separation of a stronger extrema
+  // Use haversine (kilometers) to compute distance between points so spacing
+  // is more geographically meaningful than separate lon/lat thresholds.
+  features.sort((a, b) => Math.abs(b.properties.value) - Math.abs(a.properties.value));
+  const kept = [];
+  const toRad = (deg) => (deg * Math.PI) / 180.0;
+  function haversineKm(lon1, lat1, lon2, lat2) {
+    const R = 6371.0; // earth radius km
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
+
+  function filterAndTrim(sepKm) {
+    const out = [];
+    for (const f of features) {
+      const [lon, lat] = f.geometry.coordinates;
+      let skip = false;
+      for (const k of out) {
+        const [klon, klat] = k.geometry.coordinates;
+        const dKm = haversineKm(lon, lat, klon, klat);
+        if (dKm <= sepKm) { skip = true; break; }
+      }
+      if (!skip) out.push(f);
+    }
+
+    // trim highs to be fewer than lows
+    let highsLocal = out.filter((f) => f.properties.label === "H");
+    let lowsLocal = out.filter((f) => f.properties.label === "L");
+    if (lowsLocal.length > 0) {
+      while (highsLocal.length >= lowsLocal.length && highsLocal.length > 1) {
+        let weakestIdx = 0;
+        let weakestVal = Math.abs(highsLocal[0].properties.value);
+        for (let i = 1; i < highsLocal.length; i++) {
+          const v = Math.abs(highsLocal[i].properties.value);
+          if (v < weakestVal) { weakestVal = v; weakestIdx = i; }
+        }
+        const toRemove = highsLocal[weakestIdx];
+        const ridx = out.indexOf(toRemove);
+        if (ridx !== -1) out.splice(ridx, 1);
+        highsLocal = out.filter((f) => f.properties.label === "H");
+        lowsLocal = out.filter((f) => f.properties.label === "L");
+        if (highsLocal.length === 0) break;
+      }
+    }
+
+    return out;
+  }
+
+  // Try with requested separation; if no extrema result, retry with progressively
+  // smaller separations so we always show something when possible.
+  let resultKept = filterAndTrim(minSeparationKm);
+  if (resultKept.length === 0 && features.length > 0) {
+    const attempts = [minSeparationKm / 2, minSeparationKm / 4, 200, 100, 50, 0];
+    for (const a of attempts) {
+      if (a >= minSeparationKm) continue;
+      resultKept = filterAndTrim(a);
+      if (resultKept.length > 0) break;
+    }
+  }
+
+  return { type: "FeatureCollection", features: resultKept };
+}
+
 function renderLegendTicks(palette) {
   if (!legendTicks) {
     return;
@@ -515,6 +654,32 @@ function selectForecastByIndex(index) {
   if (next?.sourceUrl) {
     fetch(`/api/reflectivity/prefetch?source=${encodeURIComponent(next.sourceUrl)}`).catch(() => {});
   }
+}
+
+function extractForecastTokenFromUrl(u) {
+  try {
+    const url = new URL(u);
+    const file = url.searchParams.get("file") || url.pathname || "";
+    const m = file.match(/f(\d{3})/);
+    if (m) return `f${m[1]}`;
+  } catch (e) {}
+  return null;
+}
+
+function replaceForecastTokenInUrl(templateUrl, token) {
+  try {
+    const url = new URL(templateUrl);
+    const file = url.searchParams.get("file");
+    if (file && /f\d{3}/.test(file)) {
+      url.searchParams.set("file", file.replace(/f\d{3}/, token));
+      return url.toString();
+    }
+    if (/f\d{3}/.test(url.pathname)) {
+      url.pathname = url.pathname.replace(/f\d{3}/, token);
+      return url.toString();
+    }
+  } catch (e) {}
+  return templateUrl;
 }
 
 function selectNextForecast(delta) {
@@ -1441,10 +1606,11 @@ async function loadDataset() {
   setMetadata(datasetEntry.metadata);
   reflectivityLayer.setDataset(datasetEntry.metadata, datasetEntry.textureBytes);
 
-  // If this product is pressure, remove shaded rendering and draw black
-  // contour lines every 6 hPa instead. For other products, ensure
-  // pressure contour layer is removed and restore normal opacity.
-  const isPressure = datasetEntry.metadata.palette?.kind === "pressure";
+  // Determine whether we need to show pressure contours:
+  // show if the base product is pressure OR the overlay checkbox is checked.
+  const baseIsPressure = datasetEntry.metadata.palette?.kind === "pressure";
+  const wantPressureOverlay = baseIsPressure || (pressureOverlayCheckbox && pressureOverlayCheckbox.checked);
+
   // remove any existing contour layer/source first
   if (map.getLayer && map.getLayer("pressure-contours-layer")) {
     try { map.removeLayer("pressure-contours-layer"); } catch (e) {}
@@ -1452,20 +1618,149 @@ async function loadDataset() {
   if (map.getSource && map.getSource("pressure-contours")) {
     try { map.removeSource("pressure-contours"); } catch (e) {}
   }
+  // remove any existing extrema layers/sources
+  if (map.getLayer && map.getLayer("pressure-extrema-labels")) {
+    try { map.removeLayer("pressure-extrema-labels"); } catch (e) {}
+  }
+  if (map.getLayer && map.getLayer("pressure-extrema-values")) {
+    try { map.removeLayer("pressure-extrema-values"); } catch (e) {}
+  }
+  if (map.getSource && map.getSource("pressure-extrema")) {
+    try { map.removeSource("pressure-extrema"); } catch (e) {}
+  }
+  // remove any existing zoom handler for extrema updates
+  if (pressureExtremaZoomHandler && map && map.off) {
+    try { map.off('zoomend', pressureExtremaZoomHandler); } catch (e) {}
+    pressureExtremaZoomHandler = null;
+  }
 
-  if (isPressure) {
-    reflectivityLayer.setOpacity(0);
-    const contoursGeoJSON = computeContours(datasetEntry.metadata, datasetEntry.textureBytes, 6);
-    try {
-      map.addSource("pressure-contours", { type: "geojson", data: contoursGeoJSON });
-      map.addLayer({
-        id: "pressure-contours-layer",
-        type: "line",
-        source: "pressure-contours",
-        paint: { "line-color": "#000000", "line-width": 1.5 },
-      });
-    } catch (e) {
-      // ignore add failures
+  if (wantPressureOverlay) {
+    // hide shaded pressure texture if base is pressure
+    if (baseIsPressure) reflectivityLayer.setOpacity(0);
+    else reflectivityLayer.setOpacity(currentOpacity);
+
+    // Determine pressure dataset source URL matching the current forecast hour.
+    const currentF = extractForecastTokenFromUrl(currentSourceUrl()) || selectedFrame?.label || "f000";
+    const prmslProduct = appConfig.products.find((p) => p.id === "prmsl");
+    if (prmslProduct) {
+      const pressureSource = replaceForecastTokenInUrl(prmslProduct.sourceUrl, currentF);
+      // fetch and render contours from pressure dataset (best-effort)
+      (async () => {
+        try {
+          const pressureEntry = await loadAndCacheDataset(pressureSource);
+          const contoursGeoJSON = computeContours(pressureEntry.metadata, pressureEntry.textureBytes, 6);
+          try {
+            map.addSource("pressure-contours", { type: "geojson", data: contoursGeoJSON });
+            map.addLayer({
+              id: "pressure-contours-layer",
+              type: "line",
+              source: "pressure-contours",
+              paint: { "line-color": "#000000", "line-width": 1.5 },
+            });
+            // Add labels along contour lines showing the pressure level (white text with black halo)
+            try {
+              map.addLayer({
+                id: "pressure-contours-labels",
+                type: "symbol",
+                source: "pressure-contours",
+                layout: {
+                  // place text along the line segments
+                  "symbol-placement": "line",
+                  "text-field": "{level}",
+                  "text-size": 12,
+                  "text-allow-overlap": false,
+                },
+                paint: {
+                  "text-color": "#ffffff",
+                  "text-halo-color": "#000000",
+                  "text-halo-width": 1.5,
+                },
+              });
+            } catch (e) {}
+            // compute and add highs/lows
+            try {
+              const initialSep = separationForZoom(map.getZoom());
+              const extrema = computePressureExtrema(pressureEntry.metadata, pressureEntry.textureBytes, initialSep);
+              map.addSource("pressure-extrema", { type: "geojson", data: extrema });
+              // value (number) layer placed above the H/L marker
+              map.addLayer({
+                id: "pressure-extrema-values",
+                type: "symbol",
+                source: "pressure-extrema",
+                layout: {
+                  "text-field": "{value}",
+                  // make the value label slightly smaller and closer to the marker
+                  "text-size": 15,
+                  // reduce vertical gap between number and H/L
+                  "text-offset": [0, -0.12],
+                  "text-anchor": "bottom",
+                  "text-allow-overlap": true,
+                },
+                // color the number to match H/L (red for L, blue for H) and add halo
+                paint: {
+                  "text-color": [
+                    "case",
+                    ["==", ["get", "label"], "L"],
+                    "#ff2b2b",
+                    ["==", ["get", "label"], "H"],
+                    "#2b6bff",
+                    "#000000",
+                  ],
+                  "text-halo-color": "#ffffff",
+                  "text-halo-width": 1.5,
+                },
+              });
+              // H/L label layer (marker) placed below the number
+              map.addLayer({
+                id: "pressure-extrema-labels",
+                type: "symbol",
+                source: "pressure-extrema",
+                layout: {
+                  "text-field": "{label}",
+                  // make the H/L marker slightly smaller to better match number
+                  "text-size": 20,
+                  // nudge the label slightly up so the gap is minimal
+                  "text-offset": [0, -0.02],
+                  "text-anchor": "top",
+                  "text-allow-overlap": true,
+                },
+                paint: {
+                  // Lows red, highs blue with halo for contrast
+                  "text-color": [
+                    "case",
+                    ["==", ["get", "label"], "L"],
+                    "#ff2b2b",
+                    ["==", ["get", "label"], "H"],
+                    "#2b6bff",
+                    "#000000",
+                  ],
+                  "text-halo-color": "#ffffff",
+                  "text-halo-width": 2,
+                },
+              });
+              // register a zoom handler to recompute extrema with a zoom-dependent separation
+              try {
+                if (pressureExtremaZoomHandler && map && map.off) {
+                  map.off('zoomend', pressureExtremaZoomHandler);
+                }
+                pressureExtremaZoomHandler = () => {
+                  try {
+                    const sep = separationForZoom(map.getZoom());
+                    const updated = computePressureExtrema(pressureEntry.metadata, pressureEntry.textureBytes, sep);
+                    const src = map.getSource && map.getSource('pressure-extrema');
+                    if (src && src.setData) {
+                      src.setData(updated);
+                    }
+                  } catch (e) {}
+                };
+                map.on('zoomend', pressureExtremaZoomHandler);
+              } catch (e) {}
+            } catch (e) {}
+          } catch (e) {}
+        } catch (e) {
+          // ignore pressure load failures
+        }
+      })();
     }
   } else {
     reflectivityLayer.setOpacity(currentOpacity);
